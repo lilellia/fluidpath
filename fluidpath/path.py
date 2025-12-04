@@ -378,6 +378,7 @@ class Path:
 
     def read_lines(
         self,
+        *,
         encoding: str = "utf-8",
         errors: str | None = None,
         newline: str | None = None,
@@ -400,8 +401,8 @@ class Path:
     def write_text(
         self,
         data: str,
-        mode: Literal["w", "a"] = "w",
         *,
+        mode: Literal["w", "a"] = "w",
         encoding: str | None = None,
         errors: str | None = None,
         newline: str | None = None,
