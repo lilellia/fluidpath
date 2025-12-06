@@ -7,7 +7,7 @@ import re
 import shutil
 import sys
 from tempfile import NamedTemporaryFile
-from typing import Any, BinaryIO, cast, IO, Literal, overload, TextIO
+from typing import Any, BinaryIO, cast, IO, Literal, overload, TextIO, TypeVar
 
 if sys.version_info >= (3, 11):
     from collections.abc import Buffer
@@ -17,6 +17,8 @@ else:
 
 from .disk_usage import DiskUsage
 from .pathtype import identify_st_mode, PathType
+
+_P = TypeVar("_P", bound="Path")
 
 
 class Path:
@@ -31,6 +33,18 @@ class Path:
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self._path})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, type(self)):
+            return str(self) == str(other)
+
+        if isinstance(other, pathlib.Path):
+            return self._path == other
+
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._path)
 
     @classmethod
     def _from_pathlib_path(cls, path: pathlib.Path) -> Self:
@@ -107,10 +121,19 @@ class Path:
         """The concaentation of the drive and root."""
         return self._path.anchor
 
+    def _get_parents_impl(self: _P) -> tuple[_P, ...]:
+        """Return a tuple of the path's parent directories.
+        This is an internal method provided as an implementation detail for the parents property
+        in order to work around known mypy limitations. Hence the unusual typing of `self: _P.`
+        """
+        return tuple(
+            type(self)._from_pathlib_path(p, semantic_path_type=SemanticPathType.DIRECTORY) for p in self._path.parents
+        )
+
     @property
     def parents(self) -> tuple[Self, ...]:
         """Return a tuple of the path's parent directories."""
-        return tuple(type(self)._from_pathlib_path(p) for p in self._path.parents)
+        return self._get_parents_impl()
 
     @property
     def parent(self) -> Self:
@@ -125,7 +148,12 @@ class Path:
     @property
     def suffix(self) -> str:
         """Return a string representing the path's last component's suffix."""
+        if re.fullmatch(r"\.+", str(self)):
+            # special case: when the path is all dots ("...."), the suffix is always empty
+            return ""
+
         if str(self).endswith("."):
+            # when the path ends with a dot (but is not all dots), the suffix is "."
             return "."
 
         return self._path.suffix
@@ -133,7 +161,12 @@ class Path:
     @property
     def suffixes(self) -> list[str]:
         """Return a list of strings representing the path's last component's suffixes."""
+        if re.fullmatch(r"\.+", str(self)):
+            # special case: when the path is all dots ("...."), the suffix is always empty
+            return []
+
         if str(self).endswith("."):
+            # when the path ends with a dot (but is not all dots), the trailing suffix is "."
             return self.with_name(self.name.rstrip(".")).suffixes + ["."]
 
         return self._path.suffixes
@@ -269,19 +302,21 @@ class Path:
         if not self.exists(follow_symlinks=False):
             return PathType.DOES_NOT_EXIST
 
-        return identify_st_mode(self.stat().st_mode)
+        return identify_st_mode(self.stat(follow_symlinks=False).st_mode)
 
     def is_directory(self, *, follow_symlinks: bool = True, must_exist: bool = False) -> bool:
         """Return True if the path points to a directory, False otherwise.
 
         If the path does not exist, then:
             - return False if `must_exist` is True (mimics the behavior of pathlib.PurePath.is_dir)
-            - return whether the path ends with "/" (i.e., if `mkdir $PATH` could succeed)
+            - return whether the path ends with "/" (i.e., if `touch $PATH` could fail)
         """
-        if self.type == PathType.DIRECTORY:
+        target = self.resolve() if follow_symlinks else self
+
+        if target.type == PathType.DIRECTORY:
             return True
 
-        if self.type == PathType.DOES_NOT_EXIST:
+        if target.type == PathType.DOES_NOT_EXIST:
             if must_exist:
                 return False
 

@@ -25,3 +25,8 @@ order-by-type = false
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+]
