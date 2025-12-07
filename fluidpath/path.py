@@ -1,5 +1,5 @@
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 import fnmatch
 import os
 import os.path
@@ -7,7 +7,7 @@ import pathlib
 import re
 import shutil
 import sys
-from tempfile import NamedTemporaryFile
+import tempfile
 from typing import Any, BinaryIO, cast, IO, Literal, overload, TextIO, TypeVar
 
 if sys.version_info >= (3, 11):
@@ -115,6 +115,57 @@ class Path:
         ValueError is raised if the path is not absolute.
         """
         return self._path.as_uri() + self._semantic_path_type.value
+
+    @classmethod
+    @contextmanager
+    def temporary_file(
+        cls,
+        *,
+        suffix: str | None = None,
+        prefix: str | None = None,
+        parent: str | os.PathLike[str] | None = None,
+        delete: bool = True,
+    ) -> Iterator[Self]:
+        """Return a path pointing to a temporary file.
+
+        This object can be used within a context manager (`with Path.temporary_file() as p: ...`).
+        Unless `delete=False`, the temporary file is automatically deleted when the context manager exits.
+        """
+        # We immediately close the file handler because we don't want to impede on further reads/writes
+        # while our context manager is active.
+        f, abspath = tempfile.mkstemp(suffix=suffix, prefix=prefix, dir=parent)
+        os.close(f)
+
+        p = cls(abspath)
+
+        try:
+            yield p
+        finally:
+            if delete:
+                p.delete(force=True)
+
+    @classmethod
+    @contextmanager
+    def temporary_directory(
+        cls,
+        *,
+        suffix: str | None = None,
+        prefix: str | None = None,
+        parent: str | os.PathLike[str] | None = None,
+        delete: bool = True,
+    ) -> Iterator[Self]:
+        """Return a path pointing to a temporary directory.
+
+        This object can be used within a context manager (`with Path.temporary_directory() as p: ...`).
+        Unless `delete=False`, the temporary directory is automatically deleted when the context manager exits.
+        """
+        temp_dir = cls(tempfile.mkdtemp(suffix=suffix, prefix=prefix, dir=parent) + os.path.sep)
+
+        try:
+            yield temp_dir
+        finally:
+            if delete:
+                temp_dir.delete(force=True)
 
     def __truediv__(self, other: str | SemanticPathLike) -> Self:
         """Return a new path by joining the given path with this path."""
@@ -628,17 +679,9 @@ class Path:
         """Write the given text to this path, ensuring that the operation is performed atomically (as one unit), which
         guarantees that on an error, the previous state of the file will be preserved.
         """
-        with NamedTemporaryFile(
-            "w",
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            delete=False,
-            dir=self.parent,
-        ) as f:
-            f.write(data)
+        with type(self).temporary_file() as temp_path:
+            temp_path.write_text(data)
 
-        temp_path = type(self)(f.name)
         try:
             temp_path.replace(self)
         except Exception:
