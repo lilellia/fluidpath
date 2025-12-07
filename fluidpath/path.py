@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import suppress
 import fnmatch
 import os
 import os.path
@@ -17,22 +18,41 @@ else:
 
 from .disk_usage import DiskUsage
 from .pathtype import identify_st_mode, PathType
+from .semantic_pathtype import identify_semantic_path_type, SemanticPathLike, SemanticPathType
 
 _P = TypeVar("_P", bound="Path")
 
 
 class Path:
     def __init__(self, *segments: str | os.PathLike[str]) -> None:
+        semantics = SemanticPathType.DIRECTORY
+
+        if segments:
+            tail = segments[-1]
+            if isinstance(tail, SemanticPathLike):
+                semantics = self._identify_semantic_path_type(tail)
+            elif isinstance(tail, str):
+                semantics = identify_semantic_path_type(tail)
+            else:
+                raise TypeError(
+                    "tail element of path must be a str or implement __semantic_path_type__(). "
+                    f"Semantically ambiguous {type(tail)} is invalid."
+                )
+
         self._path = pathlib.Path(*segments)
+        self._semantic_path_type = semantics
 
     def __fspath__(self) -> str:
         return self._path.__fspath__()
 
+    def __semantic_path_type__(self) -> SemanticPathType:
+        return self._semantic_path_type
+
     def __str__(self) -> str:
-        return self._path.__str__()
+        return os.path.normpath(str(self._path)) + self._semantic_path_type.value
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self._path})"
+        return f"{self.__class__.__name__}({self._path}{self._semantic_path_type.value})"
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, type(self)):
@@ -47,52 +67,75 @@ class Path:
         return hash(self._path)
 
     @classmethod
-    def _from_pathlib_path(cls, path: pathlib.Path) -> Self:
+    def _identify_semantic_path_type(cls, path: str | SemanticPathLike) -> SemanticPathType:
+        if isinstance(path, SemanticPathLike):
+            return path.__semantic_path_type__()
+
+        if isinstance(path, str):
+            return identify_semantic_path_type(path)
+
+        raise TypeError(f"expected str or SemanticPathLike, not {type(path)}")
+
+    @classmethod
+    def _from_pathlib_path(cls, path: pathlib.Path, *, semantic_path_type: SemanticPathType) -> Self:
         """Return an instance of this class from a pathlib.Path instance, avoiding the initialization overhead."""
         inst = cls.__new__(cls)
         inst._path = path
+        inst._semantic_path_type = semantic_path_type
         return inst
 
     @classmethod
     def home(cls) -> Self:
         """Return a new path object for the user's home directory."""
-        return cls._from_pathlib_path(pathlib.Path.home())
+        return cls._from_pathlib_path(pathlib.Path.home(), semantic_path_type=SemanticPathType.DIRECTORY)
 
-    @classmethod
-    def expand_user(cls, path: str | os.PathLike[str]) -> Self:
+    def expand_user(self) -> Self:
         """Return a new path object with the user's home directory expanded."""
-        return cls._from_pathlib_path(pathlib.Path(path).expanduser())
+        return type(self)._from_pathlib_path(self._path.expanduser(), semantic_path_type=self._semantic_path_type)
 
     @classmethod
     def cwd(cls) -> Self:
         """Return a new path object for the current working directory."""
-        return cls._from_pathlib_path(pathlib.Path.cwd())
+        return cls._from_pathlib_path(pathlib.Path.cwd(), semantic_path_type=SemanticPathType.DIRECTORY)
 
     @classmethod
     def from_uri(cls, uri: str) -> Self:
         """Return a new path object from parsing a file URI.
         ValueError is raised if the URI is invalid or the path is not absolute.
         """
-        return cls._from_pathlib_path(pathlib.Path(uri))
+        if not (match := re.match(r"file://(.*)", uri)):
+            raise ValueError(f"invalid file URI: {uri}")
+
+        filepath = match.group(1)
+        semantic_path_type = cls._identify_semantic_path_type(filepath)
+        return cls._from_pathlib_path(pathlib.Path(filepath), semantic_path_type=semantic_path_type)
 
     def as_uri(self) -> str:
         """Return a string representing the path as a file URI.
         ValueError is raised if the path is not absolute.
         """
-        return self._path.as_uri()
+        return self._path.as_uri() + self._semantic_path_type.value
 
-    def __truediv__(self, other: str | os.PathLike[str]) -> Self:
+    def __truediv__(self, other: str | SemanticPathLike) -> Self:
         """Return a new path by joining the given path with this path."""
-        return type(self)._from_pathlib_path(self._path / other)
+        if not isinstance(other, (str, SemanticPathLike)):
+            return NotImplemented
+
+        semantic_path_type = self._identify_semantic_path_type(other)
+        return type(self)._from_pathlib_path(self._path / other, semantic_path_type=semantic_path_type)
 
     @property
     def parts(self) -> tuple[str, ...]:
         """Return a tuple of the path's components."""
-        return self._path.parts
+        parts = list(self._path.parts)
+        if parts and parts[-1] != os.path.sep:
+            parts[-1] = f"{parts[-1]}{self._semantic_path_type.value}"
+
+        return tuple(parts)
 
     @property
     def components(self) -> tuple[str, ...]:
-        """Return a tuple of the path's components."""
+        """Return a tuple of the path's components. This is an alias for Path.parts."""
         return self.parts
 
     @property
@@ -138,7 +181,7 @@ class Path:
     @property
     def parent(self) -> Self:
         """Return the path's parent directory."""
-        return type(self)._from_pathlib_path(self._path.parent)
+        return type(self)._from_pathlib_path(self._path.parent, semantic_path_type=SemanticPathType.DIRECTORY)
 
     @property
     def name(self) -> str:
@@ -178,7 +221,7 @@ class Path:
 
     def absolute(self) -> Self:
         """Return a new path with the path made absolute, without normalizing or resolving symlinks."""
-        return type(self)._from_pathlib_path(self._path.absolute())
+        return type(self)._from_pathlib_path(self._path.absolute(), semantic_path_type=self._semantic_path_type)
 
     def is_absolute(self) -> bool:
         """Return whether the path is absolute or not (i.e., includes a root and, as allowed, a drive)."""
@@ -186,11 +229,55 @@ class Path:
 
     def resolve(self, *, strict: bool = False) -> Self:
         """Return a new absolute path with all symlinks resolved."""
-        return type(self)._from_pathlib_path(self._path.resolve(strict=strict))
+        try:
+            # resolve the path using pathlib.Path, then determine the semantic path type by querying what was there
+            resolved = self._path.resolve(strict=strict)
+            semantic_pathtype = SemanticPathType.DIRECTORY if resolved.is_dir() else SemanticPathType.FILE
+        except FileNotFoundError:
+            # fall back, preserving the semantic path type of this path
+            resolved = self._path.absolute()
+            semantic_pathtype = self._semantic_path_type
+
+        return type(self)._from_pathlib_path(resolved, semantic_path_type=semantic_pathtype)
+
+    def conform_to_filesystem(self) -> Self:
+        """Return a new path that semantically matches the path on the filesystem while normalizing the path.
+
+        For example:
+        >>> p = Path("/path/to/existing/file/")  # note the trailing slash
+        >>> p._semantic_path_type
+        SemanticPathType.DIRECTORY
+
+        >>> p.conform_to_filesystem()     # note the lack of trailing slash
+        Path(""/path/to/existing/file)
+        >>> p.conform_to_filesystem()._semantic_path_type
+        SemanticPathType.FILE
+        """
+        target = pathlib.Path(os.path.normpath(str(self)))
+
+        try:
+            # resolve the semantic type by checking the path on the filesystem
+            semantic_pathtype = SemanticPathType.DIRECTORY if target.is_dir() else SemanticPathType.FILE
+        except FileNotFoundError:
+            # fall back to using the existing path semantics
+            semantic_pathtype = self._semantic_path_type
+
+        return type(self)._from_pathlib_path(target, semantic_path_type=semantic_pathtype)
 
     def read_link(self) -> Self:
         """Return a new path representing the target of a symbolic link."""
-        return type(self)._from_pathlib_path(self._path.readlink())
+        target_str = os.readlink(str(self))
+        target = pathlib.Path(target_str)
+
+        try:
+            # resolve the semantic type by checking the link target on the filesystem
+            full_path = self._path.parent / target
+            semantic_pathtype = SemanticPathType.DIRECTORY if full_path.is_dir() else SemanticPathType.FILE
+        except FileNotFoundError:
+            # fall back to using the string representation
+            semantic_pathtype = identify_semantic_path_type(target_str)
+
+        return type(self)._from_pathlib_path(target, semantic_path_type=semantic_pathtype)
 
     def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
         """Return an os.stat_result object containing information about this path, like os.stat.
@@ -228,7 +315,7 @@ class Path:
         else:
             target, root = self._path, pathlib.Path(other)
 
-        return type(self)._from_pathlib_path(target.relative_to(root))
+        return type(self)._from_pathlib_path(target.relative_to(root), semantic_path_type=self._semantic_path_type)
 
     def is_reserved(self) -> bool:
         """Return True if the path is reserved on the current platform. For non-Windows platforms, this is False."""
@@ -237,9 +324,23 @@ class Path:
 
         return os.path.isreserved(self)
 
-    def joinpath(self, *other: str | os.PathLike[str]) -> Self:
+    def join_path(self, *other: str | os.PathLike[str]) -> Self:
         """Return a new path by joining the given path with this path."""
-        return type(self)._from_pathlib_path(self._path.joinpath(*other))
+        if not other:
+            return self
+
+        semantics = SemanticPathType.DIRECTORY
+        tail = other[-1]
+
+        if isinstance(tail, (SemanticPathLike, str)):
+            semantics = self._identify_semantic_path_type(tail)
+        else:
+            raise TypeError(
+                "tail element of path must be a str or implement __semantic_path_type__(). "
+                f"Semantically ambiguous {type(tail)} is invalid."
+            )
+
+        return type(self)._from_pathlib_path(self._path.joinpath(*other), semantic_path_type=semantics)
 
     def match(self, pattern: str | re.Pattern[str], *, full: bool = True, case_sensitive: bool = True) -> bool:
         """Match this path against the provided regex pattern. Returns True if the path matches the pattern.
@@ -267,13 +368,13 @@ class Path:
         """Return a path with the file name changed to `name`.
         If the original path doesn't have a name, ValueError is raised.
         """
-        return type(self)._from_pathlib_path(self._path.with_name(name))
+        return type(self)._from_pathlib_path(self._path.with_name(name), semantic_path_type=self._semantic_path_type)
 
     def with_stem(self, stem: str) -> Self:
         """Return a path with the file stem changed to `stem`.
         If the original path doesn't have a name, ValueError is raised.
         """
-        return type(self)._from_pathlib_path(self._path.with_stem(stem))
+        return type(self)._from_pathlib_path(self._path.with_stem(stem), semantic_path_type=self._semantic_path_type)
 
     def with_suffix(self, suffix: str) -> Self:
         """Return a path with the file suffix changed to `suffix`.
@@ -284,32 +385,71 @@ class Path:
         before Python 3.14, pathlib.PurePath.with_suffix(self, ".") would raise a ValueError.
         """
         if suffix == ".":
-            return type(self)(f"{self._path.with_suffix('')}.")
+            p = type(self)(f"{self._path.with_suffix('')}.")
+            p._semantic_path_type = self._semantic_path_type
+            return p
 
-        return type(self)(self._path.with_suffix(suffix))
+        return type(self)._from_pathlib_path(
+            self._path.with_suffix(suffix), semantic_path_type=self._semantic_path_type
+        )
 
-    def exists(self, *, follow_symlinks: bool = True) -> bool:
-        """Return True if the path points to an existing file or directory, False otherwise."""
+    def exists(self, *, follow_symlinks: bool = True, strict: bool = True) -> bool:
+        """Return True if the path points to an existing file or directory, False otherwise.
+
+        `strict` determines whether the path must exist with the same semantic path type.
+        For example (note the trailing slash):
+            - Path("path/to/existing/file/").exists(strict=True) == False
+              because the *directory* ".../file/" does not exist.
+
+            - Path("path/to/existing/file/").exists(strict=False) == True
+              because the path points to something which does exist on-disk.
+        """
         try:
-            self.stat(follow_symlinks=follow_symlinks)
-            return True
+            mode = self.stat(follow_symlinks=follow_symlinks).st_mode
         except (FileNotFoundError, NotADirectoryError):
             return False
+
+        if not strict:
+            # it doesn't matter what's there, as long as it exists
+            return True
+
+        pathtype = identify_st_mode(mode)
+
+        if self._semantic_path_type == SemanticPathType.DIRECTORY:
+            return pathtype == PathType.DIRECTORY
+        else:
+            return pathtype not in (PathType.DIRECTORY, PathType.UNKNOWN)
 
     @property
     def type(self) -> PathType:
         """Return the type of the given path: e.g, REGULAR_FILE or DIRECTORY."""
-        if not self.exists(follow_symlinks=False):
+        if not self.exists(follow_symlinks=False, strict=False):
             return PathType.DOES_NOT_EXIST
 
         return identify_st_mode(self.stat(follow_symlinks=False).st_mode)
 
     def is_directory(self, *, follow_symlinks: bool = True, must_exist: bool = False) -> bool:
-        """Return True if the path points to a directory, False otherwise.
+        """Return True if the path is a directory, False otherwise. If the path does not exist, use semantic reasoning.
+
+        If the path exists, then return whether this path points to a directory on disk.
 
         If the path does not exist, then:
             - return False if `must_exist` is True (mimics the behavior of pathlib.PurePath.is_dir)
-            - return whether the path ends with "/" (i.e., if `touch $PATH` could fail)
+            - return whether the path is semantically a directory
+
+        Examples:
+              # regardless of the value of `must_exist`
+            - Path("path/to/existing/file").is_directory() == False
+            - Path("path/to/existing/directory/").is_directory() == True
+
+              # equivalent results to pathlib.Path.is_dir
+            - Path("path/to/nonexistent/file").is_directory(must_exist=True) == False
+            - Path("path/to/nonexistent/directory/").is_directory(must_exist=True) == False
+
+              # with `must_exist = False` (default), use semantic reasoning
+            - Path("path/to/nonexistent/file").is_directory() == False
+            - Path("path/to/nonexistent/directory/").is_directory() == True
+
         """
         target = self.resolve() if follow_symlinks else self
 
@@ -320,28 +460,43 @@ class Path:
             if must_exist:
                 return False
 
-            return str(self).endswith("/")
+            return self._semantic_path_type == SemanticPathType.DIRECTORY
 
         return False
 
     def is_file(self, *, follow_symlinks: bool = True, must_exist: bool = False) -> bool:
-        """Return True if the path points to a file, False otherwise.
+        """Return True if the path is any file, False otherwise. If the path does not exist, use semantic reasoning.
+        Note that, e.g., Path("path/to/symlink").is_file() == True because symlinks *are* files.
+
+        If the path exists, then return whether this path points to a file on disk.
 
         If the path does not exist, then:
-            - return False if `must_exist` is True (mimics the behavior of pathlib.PurePath.is_file)
-            - return whether the path does not end with "/" (i.e., if `touch $PATH` could succeed)
+            - return False if `must_exist` is True (mimics the behavior of pathlib.PurePath.is_dir)
+            - return whether the path is semantically a file
 
-        Note that this function does not distinguish between different types of files like pathlib.PurePath.is_file.
-        To check that a path is a regular file, use .type == PathType.REGULAR_FILE or .is_regular_file.
+        Examples:
+              # regardless of the value of `must_exist`
+            - Path("path/to/existing/file").is_file() == True
+            - Path("path/to/existing/directory/").is_file() == False
+
+              # equivalent results to pathlib.Path.is_dir
+            - Path("path/to/nonexistent/file").is_file(must_exist=True) == False
+            - Path("path/to/nonexistent/directory/").is_file(must_exist=True) == False
+
+              # with `must_exist = False` (default), use semantic reasoning
+            - Path("path/to/nonexistent/file").is_file() == True
+            - Path("path/to/nonexistent/directory/").is_file() == False
         """
-        if self.type == PathType.DIRECTORY:
-            return False
+        target = self.resolve() if follow_symlinks else self
 
-        if self.type == PathType.DOES_NOT_EXIST:
+        if target.type not in (PathType.DIRECTORY, PathType.UNKNOWN):
+            return True
+
+        if target.type == PathType.DOES_NOT_EXIST:
             if must_exist:
                 return False
 
-            return str(self).endswith("/")
+            return self._semantic_path_type == SemanticPathType.FILE
 
         return False
 
@@ -497,13 +652,15 @@ class Path:
         """Iterate over the children of the directory represented by this path.
         If this path is not a directory, OSError is raised.
         """
-        return iter(type(self)._from_pathlib_path(path) for path in self._path.iterdir())
+        return self.iterdir()
 
     def iterdir(self) -> Iterator[Self]:
         """Iterate over the children of the directory represented by this path.
         If this path is not a directory, OSError is raised.
         """
-        return self.__iter__()
+        for path in self._path.iterdir():
+            semantics = SemanticPathType.DIRECTORY if path.is_dir() else SemanticPathType.FILE
+            yield type(self)._from_pathlib_path(path, semantic_path_type=semantics)
 
     def copy(
         self,
@@ -577,22 +734,36 @@ class Path:
 
         shutil.copystat(self, to, follow_symlinks=follow_symlinks)
 
-    def delete(self, *, recursive: bool = False, ignore_errors: bool = False) -> None:
-        """Delete this path.
+    def delete(self, *, recursive: bool = False, strict: bool = True, force: bool = False) -> None:
+        """Delete this path (file, symlink, or directory). With `force=False`, raise an error if the path doesn't exist.
 
-        If this path is a directory and `recursive = False`, then this will fail if the directory is nonempty.
-        If this path is a directory and `recursive = True`, then the entire tree (rooted at this path) will be deleted.
+        `recursive`
+            If True and the path is a physical directory, delete the entire directory tree;
+            if False and the path is a physical directory, fails if the directory is nonempty unless `force` is True.
+
+        `force`
+            If True, proceed without checking for existence and suppressing FileNotFoundError/OSError on failure,
+            equivalent to a best-effort delete.
+
+            `force=True` also allows deleting nonempty directories even when `recursive=False`.
+
+        `strict`
+            Alongside `force=False`, raise FileNotFoundError if the path exists but has the wrong semantic type.
+            For example, if `p = Path("path/to/file/")` is a physical file (despite its semantic type as directory),
+            then `p.delete(strict=False)` will succeed, but `p.delete(strict=True)` will fail.
         """
-        if not self.exists(follow_symlinks=False):
+        if not force and not self.exists(follow_symlinks=False, strict=strict):
             raise FileNotFoundError(f"Cannot delete nonexistent path: {self}")
 
-        if self.is_directory():
-            if recursive:
-                shutil.rmtree(self, ignore_errors=ignore_errors)
+        if self.is_directory(follow_symlinks=False):
+            if recursive or force:
+                shutil.rmtree(self, ignore_errors=force)
             else:
                 self._path.rmdir()
+        elif force:
+            with suppress(FileNotFoundError):
+                self._path.unlink()
         else:
-            # delete file
             self._path.unlink()
 
     def move(self, to: Self, *, metadata: bool = True) -> None:
@@ -620,7 +791,7 @@ class Path:
         if force:
             return self.replace(to)
 
-        return type(self)._from_pathlib_path(self._path.rename(to))
+        return type(self)._from_pathlib_path(self._path.rename(to), semantic_path_type=self._semantic_path_type)
 
     def replace(self, to: str | os.PathLike[str]) -> Self:
         """Rename this path to the given name, overwriting the target if it exists.
@@ -631,7 +802,7 @@ class Path:
         if not self.exists(follow_symlinks=False):
             raise FileNotFoundError(f"Cannot replace nonexistent path: {self}")
 
-        return type(self)._from_pathlib_path(self._path.replace(to))
+        return type(self)._from_pathlib_path(self._path.replace(to), semantic_path_type=self._semantic_path_type)
 
     def disk_usage(self) -> DiskUsage:
         """Return disk usage statistics on the given path, as (total, used, free). Values are given in bytes.

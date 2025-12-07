@@ -5,23 +5,24 @@ from typing import cast
 import pytest
 
 from fluidpath import Path
+from fluidpath.semantic_pathtype import identify_semantic_path_type, SemanticPathType
 
 
 def force_windows_pure_path(path: str) -> Path:
     """Forcibly construct a Path using a PureWindowsPath. Only use for testing *pure* methods."""
     p = cast(pathlib.Path, pathlib.PureWindowsPath(path))
-    return Path._from_pathlib_path(p)
+    return Path._from_pathlib_path(p, semantic_path_type=identify_semantic_path_type(path))
 
 
 def force_posix_pure_path(path: str) -> Path:
     """Forcibly construct a Path using a PurePosixPath. Only use for testing *pure* methods."""
     p = cast(pathlib.Path, pathlib.PurePosixPath(path))
-    return Path._from_pathlib_path(p)
+    return Path._from_pathlib_path(p, semantic_path_type=identify_semantic_path_type(path))
 
 
 def test_from_pathlib_path_bypass() -> None:
     p = pathlib.Path("foo")
-    assert Path._from_pathlib_path(p)._path is p
+    assert Path._from_pathlib_path(p, semantic_path_type=SemanticPathType.FILE)._path is p
 
 
 def test_home() -> None:
@@ -30,8 +31,9 @@ def test_home() -> None:
 
 
 def test_expand_user() -> None:
-    assert isinstance(Path.expand_user("foo")._path, pathlib.Path)
-    assert Path.expand_user("foo")._path == pathlib.Path("foo").expanduser()
+    p = Path("foo")
+    assert isinstance(p.expand_user()._path, pathlib.Path)
+    assert p.expand_user()._path == pathlib.Path("foo").expanduser()
 
 
 def test_from_uri_valid() -> None:
@@ -148,12 +150,12 @@ def test_anchor(path: Path, anchor: str) -> None:
 
 def test_parents() -> None:
     p = Path("foo") / "bar" / "baz"
-    assert p.parents == (Path("foo/bar"), Path("foo"), Path("."))
+    assert p.parents == (Path("foo/bar/"), Path("foo/"), Path("."))
 
 
 def test_parent() -> None:
     p = Path("foo") / "bar" / "baz"
-    assert p.parent == Path("foo/bar")
+    assert p.parent == Path("foo/bar/")
 
 
 def test_name() -> None:
@@ -282,7 +284,7 @@ def test_read_link_with_symlink_to_dir(mock_fs: Path, monkeypatch: pytest.Monkey
 
     # NB: mock_fs/symlink-to-dir --> mock_fs/a
     p = Path("symlink-to-dir")
-    assert p.read_link() == mock_fs / "a"
+    assert p.read_link() == mock_fs / "a/"
 
 
 def test_read_link_with_broken_symlink(mock_fs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
