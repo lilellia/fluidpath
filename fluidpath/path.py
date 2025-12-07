@@ -10,7 +10,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, BinaryIO, cast, IO, Literal, overload, ParamSpec, TextIO, TypeVar
+from typing import Any, BinaryIO, IO, Literal, overload, ParamSpec, TextIO, TypeVar
 
 if sys.version_info >= (3, 11):
     from collections.abc import Buffer
@@ -18,6 +18,7 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Buffer, Self
 
+from . import usergroup
 from .disk_usage import DiskUsage
 from .pathtype import identify_st_mode, PathType
 from .semantic_pathtype import identify_semantic_path_type, SemanticPathLike, SemanticPathType
@@ -899,24 +900,16 @@ class Path:
         if not self.exists(follow_symlinks=False):
             raise FileNotFoundError(f"Cannot change owner/group for nonexistent path: {self}")
 
-        # shutil's stub files don't show None as a valid type for user/group (despite it being the default),
-        # meaning that mypy complains if we try to pass it. Thus, instead of just calling shutil.chown(...) with
-        # all of the args, we will just not pass them and abuse the defaults.
+        if os.name == "nt":
+            raise OSError("chown is not supported on Windows.")
 
-        target = self.resolve() if follow_symlinks else self
-        match user, group:
-            case None, None:
-                raise ValueError("At least one of `user` and `group` must be specified.")
-            case user, None:
-                user = cast(int | str, user)
-                shutil.chown(target, user=user)
-            case None, group:
-                group = cast(int | str, group)
-                shutil.chown(target, group=group)
-            case user, group:
-                user = cast(int | str, user)
-                group = cast(int | str, group)
-                shutil.chown(target, user=user, group=group)
+        uid = usergroup.get_uid_of(user)
+        gid = usergroup.get_gid_of(group)
+
+        if uid == gid == -1:
+            raise ValueError("At least one of `user` and `group` must be specified.")
+
+        os.chown(self, uid, gid, follow_symlinks=follow_symlinks)
 
     @access_error_handler
     def chmod(self, mode: int, *, follow_symlinks: bool = True) -> None:
@@ -924,8 +917,7 @@ class Path:
         if not self.exists(follow_symlinks=False):
             raise FileNotFoundError(f"Cannot change permissions for nonexistent path: {self}")
 
-        target = self.resolve() if follow_symlinks else self
-        os.chmod(target, mode)
+        os.chmod(self, mode, follow_symlinks=follow_symlinks)
 
     @access_error_handler
     def __contains__(self, other: str | os.PathLike[str]) -> bool:
