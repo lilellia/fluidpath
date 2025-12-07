@@ -1,5 +1,6 @@
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
+from datetime import datetime
 import fnmatch
 import os
 import os.path
@@ -19,6 +20,7 @@ else:
 from .disk_usage import DiskUsage
 from .pathtype import identify_st_mode, PathType
 from .semantic_pathtype import identify_semantic_path_type, SemanticPathLike, SemanticPathType
+from .size_unit_prefixes import BinarySizePrefix, DecimalSizePrefix, SIZE_PREFIX_CONVERSIONS
 
 _P = TypeVar("_P", bound="Path")
 
@@ -551,30 +553,6 @@ class Path:
 
         return False
 
-    def is_regular_file(self) -> bool:
-        """Return True if the path points to a regular file, False otherwise."""
-        return self.type == PathType.REGULAR_FILE
-
-    def is_symlink(self) -> bool:
-        """Return True if the path points to a symbolic link, False otherwise."""
-        return self.type == PathType.SYMLINK
-
-    def is_mount_point(self) -> bool:
-        """Return True if the path is a mount point, False otherwise."""
-        return self._path.is_mount()
-
-    def is_socket(self) -> bool:
-        """Return True if the path points to a socket, False otherwise."""
-        return self.type == PathType.SOCKET
-
-    def is_block_device(self) -> bool:
-        """Return True if the path points to a block device, False otherwise."""
-        return self.type == PathType.BLOCK_DEVICE
-
-    def is_char_device(self) -> bool:
-        """Return True if the path points to a character device, False otherwise."""
-        return self.type == PathType.CHAR_DEVICE
-
     def is_same_file(self, other: os.PathLike[str]) -> bool:
         return self._path.samefile(pathlib.Path(other))
 
@@ -1058,10 +1036,105 @@ class Path:
         """Create a hard link to the target file."""
         self._path.link_to(target)
 
-    def get_owner(self, *, follow_symlinks: bool = True) -> str:
-        """Return the username of the file owner."""
-        return (self._path.resolve() if follow_symlinks else self._path).owner()
+    def owner(self, *, follow_symlinks: bool = True) -> str:
+        """Return the owner name of the file owner."""
+        if os.name == "nt":
+            raise OSError("Owner name cannot be determined on this platform.")
 
-    def get_group(self, *, follow_symlinks: bool = True) -> str:
+        try:
+            import pwd
+        except ImportError:
+            # collapse the NotImplementedError/pathlib.UnsupportedOperation dichotomy
+            raise OSError("Owner name cannot be determined on this platform.")
+
+        return pwd.getpwuid(self.owner_id(follow_symlinks=follow_symlinks)).pw_name
+
+    def owner_id(self, *, follow_symlinks: bool = True) -> int:
+        """Return the user ID of the file owner."""
+        return self.stat(follow_symlinks=follow_symlinks).st_uid
+
+    def group(self, *, follow_symlinks: bool = True) -> str:
         """Return the group name of the file owner."""
-        return (self._path.resolve() if follow_symlinks else self._path).group()
+        if os.name == "nt":
+            raise OSError("Group name cannot be determined on this platform.")
+
+        try:
+            import grp
+        except ImportError:
+            # collapse the NotImplementedError/pathlib.UnsupportedOperation dichotomy
+            raise OSError("Group name cannot be determined on this platform.")
+
+        return grp.getgrgid(self.group_id(follow_symlinks=follow_symlinks)).gr_name
+
+    def group_id(self, *, follow_symlinks: bool = True) -> int:
+        """Return the group ID of the file owner."""
+        return self.stat(follow_symlinks=follow_symlinks).st_gid
+
+    def inode(self, *, follow_symlinks: bool = True) -> int:
+        """Return the inode number of the file."""
+        return self.stat(follow_symlinks=follow_symlinks).st_ino
+
+    def device(self, *, follow_symlinks: bool = True) -> int:
+        """Return the device number of the file."""
+        return self.stat(follow_symlinks=follow_symlinks).st_dev
+
+    def hardlinks(self, *, follow_symlinks: bool = True) -> int:
+        """Return the number of hard links to the file."""
+        return self.stat(follow_symlinks=follow_symlinks).st_nlink
+
+    def size(
+        self,
+        *,
+        follow_symlinks: bool = True,
+        unit: DecimalSizePrefix | BinarySizePrefix = "B",
+    ) -> float:
+        """Return the size of the file, in bytes."""
+        if unit not in SIZE_PREFIX_CONVERSIONS.keys():
+            raise ValueError(f"Invalid size unit: {unit}")
+
+        factor = SIZE_PREFIX_CONVERSIONS[unit]
+
+        if self.type == PathType.DIRECTORY:
+            total = sum(child.size(follow_symlinks=follow_symlinks, unit="B") for child in self)
+            return total / factor
+
+        return self.stat(follow_symlinks=follow_symlinks).st_size / factor
+
+    def accessed_time(self, *, follow_symlinks: bool = True) -> datetime:
+        """Return the last access time of the file."""
+        return datetime.fromtimestamp(self.stat(follow_symlinks=follow_symlinks).st_atime)
+
+    def modified_time(self, *, follow_symlinks: bool = True) -> datetime:
+        """Return the last modification time of the file."""
+        return datetime.fromtimestamp(self.stat(follow_symlinks=follow_symlinks).st_mtime)
+
+    def metadata_modified_time(self, *, follow_symlinks: bool = True) -> datetime:
+        """Return the last metadata change time of the file."""
+        return datetime.fromtimestamp(self.stat(follow_symlinks=follow_symlinks).st_ctime)
+
+    def _created_time_windows(self, *, follow_symlinks: bool = True) -> datetime:
+        """Return the creation time of the file (Windows implementation)."""
+        attr = "st_ctime" if sys.version_info < (3, 12) else "st_birthtime"
+        stat_info = self.stat(follow_symlinks=follow_symlinks)
+
+        ts = getattr(stat_info, attr)
+        return datetime.fromtimestamp(ts)
+
+    def _created_time_posix(self, *, follow_symlinks: bool = True) -> datetime:
+        """Return the creation time of the file (POSIX implementation)."""
+        try:
+            # st_birthtime is not always available
+            # "type ignore" is used because mypy cannot determine whether it exists
+            ts = self.stat(follow_symlinks=follow_symlinks).st_birthtime  # type: ignore
+        except AttributeError:
+            raise OSError("Creation time cannot be determined on this platform.")
+
+        return datetime.fromtimestamp(ts)
+
+    def created_time(self, *, follow_symlinks: bool = True) -> datetime:
+        """Return the creation time of the file."""
+
+        if os.name == "nt":
+            return self._created_time_windows(follow_symlinks=follow_symlinks)
+
+        return self._created_time_posix(follow_symlinks=follow_symlinks)
