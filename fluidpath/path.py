@@ -2,6 +2,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime
 import fnmatch
+from functools import wraps
 import os
 import os.path
 import pathlib
@@ -9,7 +10,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, BinaryIO, cast, IO, Literal, overload, TextIO, TypeVar
+from typing import Any, BinaryIO, cast, IO, Literal, overload, ParamSpec, TextIO, TypeVar
 
 if sys.version_info >= (3, 11):
     from collections.abc import Buffer
@@ -23,6 +24,25 @@ from .semantic_pathtype import identify_semantic_path_type, SemanticPathLike, Se
 from .size_unit_prefixes import BinarySizePrefix, DecimalSizePrefix, SIZE_PREFIX_CONVERSIONS
 
 _P = TypeVar("_P", bound="Path")
+_R = TypeVar("_R")
+_S = ParamSpec("_S")
+
+
+def access_error_handler(func: Callable[_S, _R]) -> Callable[_S, _R]:
+    """Wrap methods that access paths to catch permission errors and file not found errors."""
+
+    @wraps(func)
+    def wrapper(*args: _S.args, **kwargs: _S.kwargs) -> _R:
+        try:
+            return func(*args, **kwargs)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Path does not exist: {args[0]}. Failed during {func.__name__}.")
+        except PermissionError:
+            raise PermissionError(f"Permission denied: {args[0]}. Failed during {func.__name__}.")
+        except OSError as e:
+            raise OSError(f"Failed to access {args[0]} during {func.__name__}. Reason: {e}")
+
+    return wrapper
 
 
 class Path:
@@ -280,6 +300,7 @@ class Path:
         """Return whether the path is absolute or not (i.e., includes a root and, as allowed, a drive)."""
         return self._path.is_absolute()
 
+    @access_error_handler
     def resolve(self, *, strict: bool = False) -> Self:
         """Return a new absolute path with all symlinks resolved."""
         try:
@@ -293,6 +314,7 @@ class Path:
 
         return type(self)._from_pathlib_path(resolved, semantic_path_type=semantic_pathtype)
 
+    @access_error_handler
     def conform_to_filesystem(self) -> Self:
         """Return a new path that semantically matches the path on the filesystem while normalizing the path.
 
@@ -317,6 +339,7 @@ class Path:
 
         return type(self)._from_pathlib_path(target, semantic_path_type=semantic_pathtype)
 
+    @access_error_handler
     def read_link(self) -> Self:
         """Return a new path representing the target of a symbolic link."""
         target_str = os.readlink(str(self))
@@ -332,6 +355,7 @@ class Path:
 
         return type(self)._from_pathlib_path(target, semantic_path_type=semantic_pathtype)
 
+    @access_error_handler
     def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
         """Return an os.stat_result object containing information about this path, like os.stat.
         The result is looked up at each call to this method.
@@ -340,6 +364,7 @@ class Path:
         """
         return self._path.stat(follow_symlinks=follow_symlinks)
 
+    @access_error_handler
     def is_relative_to(self, other: str | os.PathLike[str], *, strict: bool = False) -> bool:
         """Return whether the path is relative to another path.
 
@@ -355,6 +380,7 @@ class Path:
 
         return target.is_relative_to(root)
 
+    @access_error_handler
     def relative_to(self, other: str | os.PathLike[str], *, strict: bool = False) -> Self:
         """Compute a version of this path relative to the path represented by `other`.
 
@@ -446,6 +472,7 @@ class Path:
             self._path.with_suffix(suffix), semantic_path_type=self._semantic_path_type
         )
 
+    @access_error_handler
     def exists(self, *, follow_symlinks: bool = True, strict: bool = True) -> bool:
         """Return True if the path points to an existing file or directory, False otherwise.
 
@@ -474,6 +501,7 @@ class Path:
             return pathtype not in (PathType.DIRECTORY, PathType.UNKNOWN)
 
     @property
+    @access_error_handler
     def type(self) -> PathType:
         """Return the type of the given path: e.g, REGULAR_FILE or DIRECTORY."""
         if not self.exists(follow_symlinks=False, strict=False):
@@ -481,6 +509,7 @@ class Path:
 
         return identify_st_mode(self.stat(follow_symlinks=False).st_mode)
 
+    @access_error_handler
     def is_directory(self, *, follow_symlinks: bool = True, must_exist: bool = False) -> bool:
         """Return True if the path is a directory, False otherwise. If the path does not exist, use semantic reasoning.
 
@@ -517,6 +546,7 @@ class Path:
 
         return False
 
+    @access_error_handler
     def is_file(self, *, follow_symlinks: bool = True, must_exist: bool = False) -> bool:
         """Return True if the path is any file, False otherwise. If the path does not exist, use semantic reasoning.
         Note that, e.g., Path("path/to/symlink").is_file() == True because symlinks *are* files.
@@ -553,10 +583,12 @@ class Path:
 
         return False
 
+    @access_error_handler
     def is_same_file(self, other: os.PathLike[str]) -> bool:
         return self._path.samefile(pathlib.Path(other))
 
     @overload
+    @access_error_handler
     def open(
         self,
         mode: Literal["r", "w", "a", "r+", "w+", "a+", "x", "x+"] = "r",
@@ -568,6 +600,7 @@ class Path:
     ) -> TextIO: ...
 
     @overload
+    @access_error_handler
     def open(
         self,
         mode: Literal["rb", "wb", "ab", "r+b", "w+b", "a+b", "xb", "x+b"],
@@ -578,6 +611,7 @@ class Path:
         newline: None = None,
     ) -> BinaryIO: ...
 
+    @access_error_handler
     def open(
         self,
         mode: str = "r",
@@ -590,11 +624,13 @@ class Path:
         """Open the file pointed to by the path, like builtins.open does."""
         return self._path.open(mode=mode, buffering=buffering, encoding=encoding, errors=errors, newline=newline)
 
+    @access_error_handler
     def read_text(self, *, encoding: str = "utf-8", errors: str | None = None, newline: str | None = None) -> str:
         """Open the file pointed to in text mode, read its contents, and close the file."""
         with open(self, mode="rt", encoding=encoding, errors=errors, newline=newline) as f:
             return f.read()
 
+    @access_error_handler
     def read_lines(
         self,
         *,
@@ -605,11 +641,13 @@ class Path:
         """Read the contents of the file, returning a list of the line contents."""
         return self.read_text(encoding=encoding, errors=errors, newline=newline).splitlines()
 
+    @access_error_handler
     def read_bytes(self) -> bytes:
         """Open the file pointed to in text mode, read its contents, and close the file."""
         with open(self, mode="rb") as f:
             return f.read()
 
+    @access_error_handler
     def write_bytes(self, data: Buffer, *, mode: Literal["w", "a"] = "w") -> int:
         """Open the file pointed to in binary mode, write `data` to it, and close the file.
         If `mode = "w"`, an existing file of the same name is overwritten; if `mode = "a"`, data is written to the end.
@@ -617,6 +655,7 @@ class Path:
         with open(self, mode=f"{mode}b") as f:
             return f.write(data)
 
+    @access_error_handler
     def write_text(
         self,
         data: str,
@@ -632,6 +671,7 @@ class Path:
         with open(self, mode=mode, encoding=encoding, errors=errors, newline=newline) as f:
             return f.write(data)
 
+    @access_error_handler
     def write_lines(
         self,
         lines: Iterable[str],
@@ -647,6 +687,7 @@ class Path:
         with open(self, mode=mode, encoding=encoding, errors=errors, newline=newline) as f:
             f.writelines(lines)
 
+    @access_error_handler
     def write_text_atomic(
         self,
         data: str,
@@ -669,12 +710,14 @@ class Path:
                 pass
             raise
 
+    @access_error_handler
     def __iter__(self) -> Iterator[Self]:
         """Iterate over the children of the directory represented by this path.
         If this path is not a directory, OSError is raised.
         """
         return self.iterdir()
 
+    @access_error_handler
     def iterdir(self) -> Iterator[Self]:
         """Iterate over the children of the directory represented by this path.
         If this path is not a directory, OSError is raised.
@@ -683,6 +726,7 @@ class Path:
             semantics = SemanticPathType.DIRECTORY if path.is_dir() else SemanticPathType.FILE
             yield type(self)._from_pathlib_path(path, semantic_path_type=semantics)
 
+    @access_error_handler
     def copy(
         self,
         to: Self,
@@ -731,6 +775,7 @@ class Path:
         else:
             copy_function(self, to, follow_symlinks=follow_symlinks)
 
+    @access_error_handler
     def copy_permissions(self, to: Self, *, follow_symlinks: bool = True) -> None:
         """Copy the permission bits from self to the other path (`to`). The file contents/owner/group are unaffected.
 
@@ -742,6 +787,7 @@ class Path:
 
         shutil.copymode(self, to, follow_symlinks=follow_symlinks)
 
+    @access_error_handler
     def copy_stat(self, to: Self, *, follow_symlinks: bool = True) -> None:
         """Copy permission bits, last access time, last modification time, and flags to the target path.
         On Linux, this also copies the extended attributes where possible.
@@ -755,6 +801,7 @@ class Path:
 
         shutil.copystat(self, to, follow_symlinks=follow_symlinks)
 
+    @access_error_handler
     def delete(self, *, recursive: bool = False, strict: bool = True, force: bool = False) -> None:
         """Delete this path (file, symlink, or directory). With `force=False`, raise an error if the path doesn't exist.
 
@@ -787,6 +834,7 @@ class Path:
         else:
             self._path.unlink()
 
+    @access_error_handler
     def move(self, to: Self, *, metadata: bool = True) -> None:
         """Recursively move this path to the given destination (`to`).
         If `to` is an existing directory, the source is placed inside it.
@@ -798,6 +846,7 @@ class Path:
         copy_function = shutil.copy2 if metadata else shutil.copy
         shutil.move(self, to, copy_function=copy_function)
 
+    @access_error_handler
     def rename(self, to: str | os.PathLike[str], *, force: bool = True) -> Self:
         """Rename this path to the given name.
 
@@ -814,6 +863,7 @@ class Path:
 
         return type(self)._from_pathlib_path(self._path.rename(to), semantic_path_type=self._semantic_path_type)
 
+    @access_error_handler
     def replace(self, to: str | os.PathLike[str]) -> Self:
         """Rename this path to the given name, overwriting the target if it exists.
 
@@ -825,6 +875,7 @@ class Path:
 
         return type(self)._from_pathlib_path(self._path.replace(to), semantic_path_type=self._semantic_path_type)
 
+    @access_error_handler
     def disk_usage(self) -> DiskUsage:
         """Return disk usage statistics on the given path, as (total, used, free). Values are given in bytes.
         (Unix) The given path must be mounted.
@@ -834,6 +885,7 @@ class Path:
 
         return DiskUsage(*shutil.disk_usage(self))
 
+    @access_error_handler
     def chown(
         self,
         user: int | str | None = None,
@@ -866,6 +918,7 @@ class Path:
                 group = cast(int | str, group)
                 shutil.chown(target, user=user, group=group)
 
+    @access_error_handler
     def chmod(self, mode: int, *, follow_symlinks: bool = True) -> None:
         """Change the permissions of the given path."""
         if not self.exists(follow_symlinks=False):
@@ -874,10 +927,12 @@ class Path:
         target = self.resolve() if follow_symlinks else self
         os.chmod(target, mode)
 
+    @access_error_handler
     def __contains__(self, other: str | os.PathLike[str]) -> bool:
         """Determine whether the other path is within the subpath of this path."""
         return type(self)(other).is_relative_to(self, strict=True)
 
+    @access_error_handler
     def _get_relative_depth(self, other: Self) -> int:
         """Returns the number of components in `other` relative to `self`."""
         if other not in self:
@@ -889,6 +944,7 @@ class Path:
 
         return len(other.relative_to(self).parts)
 
+    @access_error_handler
     def walk(
         self, *, top_down: bool = True, on_error: Callable[[OSError], None] | None = None
     ) -> Iterator[tuple[Self, list[str], list[str]]]:
@@ -907,6 +963,7 @@ class Path:
         for root_name, dirnames, filenames in os.walk(str(self), top_down, on_error):
             yield type(self)(root_name), dirnames, filenames
 
+    @access_error_handler
     def traverse(
         self,
         *,
@@ -948,6 +1005,7 @@ class Path:
 
                 yield path
 
+    @access_error_handler
     def find(
         self,
         pattern: str | re.Pattern[str] = "",
@@ -1004,6 +1062,7 @@ class Path:
 
             yield path
 
+    @access_error_handler
     def touch(self, *, mode: int = 0o666, exist_ok: bool = False) -> None:
         """Create an empty file at this path.
 
@@ -1014,6 +1073,7 @@ class Path:
         """
         self._path.touch(mode=mode, exist_ok=exist_ok)
 
+    @access_error_handler
     def mkdir(self, *, mode: int = 0o777, parents: bool = False, exist_ok: bool = False) -> None:
         """Create a directory at this path.
 
@@ -1028,14 +1088,17 @@ class Path:
         """
         self._path.mkdir(mode=mode, parents=parents, exist_ok=exist_ok)
 
+    @access_error_handler
     def symlink_to(self, target: str | os.PathLike[str], *, target_is_directory: bool = False) -> None:
         """Create a symbolic link to the target file or directory."""
         self._path.symlink_to(target, target_is_directory=target_is_directory)
 
+    @access_error_handler
     def hardlink_to(self, target: str | os.PathLike[str]) -> None:
         """Create a hard link to the target file."""
         self._path.link_to(target)
 
+    @access_error_handler
     def owner(self, *, follow_symlinks: bool = True) -> str:
         """Return the owner name of the file owner."""
         if os.name == "nt":
@@ -1049,10 +1112,12 @@ class Path:
 
         return pwd.getpwuid(self.owner_id(follow_symlinks=follow_symlinks)).pw_name
 
+    @access_error_handler
     def owner_id(self, *, follow_symlinks: bool = True) -> int:
         """Return the user ID of the file owner."""
         return self.stat(follow_symlinks=follow_symlinks).st_uid
 
+    @access_error_handler
     def group(self, *, follow_symlinks: bool = True) -> str:
         """Return the group name of the file owner."""
         if os.name == "nt":
@@ -1066,22 +1131,27 @@ class Path:
 
         return grp.getgrgid(self.group_id(follow_symlinks=follow_symlinks)).gr_name
 
+    @access_error_handler
     def group_id(self, *, follow_symlinks: bool = True) -> int:
         """Return the group ID of the file owner."""
         return self.stat(follow_symlinks=follow_symlinks).st_gid
 
+    @access_error_handler
     def inode(self, *, follow_symlinks: bool = True) -> int:
         """Return the inode number of the file."""
         return self.stat(follow_symlinks=follow_symlinks).st_ino
 
+    @access_error_handler
     def device(self, *, follow_symlinks: bool = True) -> int:
         """Return the device number of the file."""
         return self.stat(follow_symlinks=follow_symlinks).st_dev
 
+    @access_error_handler
     def hardlinks(self, *, follow_symlinks: bool = True) -> int:
         """Return the number of hard links to the file."""
         return self.stat(follow_symlinks=follow_symlinks).st_nlink
 
+    @access_error_handler
     def size(
         self,
         *,
@@ -1095,23 +1165,33 @@ class Path:
         factor = SIZE_PREFIX_CONVERSIONS[unit]
 
         if self.type == PathType.DIRECTORY:
-            total = sum(child.size(follow_symlinks=follow_symlinks, unit="B") for child in self)
+            total = 0.0
+            try:
+                for child in self:
+                    total += child.size(follow_symlinks=follow_symlinks, unit="B")
+            except OSError as e:
+                raise OSError(f"Failed to calculate recursive size for directory: {self}. Details: {e}")
+
             return total / factor
 
         return self.stat(follow_symlinks=follow_symlinks).st_size / factor
 
+    @access_error_handler
     def accessed_time(self, *, follow_symlinks: bool = True) -> datetime:
         """Return the last access time of the file."""
         return datetime.fromtimestamp(self.stat(follow_symlinks=follow_symlinks).st_atime)
 
+    @access_error_handler
     def modified_time(self, *, follow_symlinks: bool = True) -> datetime:
         """Return the last modification time of the file."""
         return datetime.fromtimestamp(self.stat(follow_symlinks=follow_symlinks).st_mtime)
 
+    @access_error_handler
     def metadata_modified_time(self, *, follow_symlinks: bool = True) -> datetime:
         """Return the last metadata change time of the file."""
         return datetime.fromtimestamp(self.stat(follow_symlinks=follow_symlinks).st_ctime)
 
+    @access_error_handler
     def _created_time_windows(self, *, follow_symlinks: bool = True) -> datetime:
         """Return the creation time of the file (Windows implementation)."""
         attr = "st_ctime" if sys.version_info < (3, 12) else "st_birthtime"
@@ -1120,6 +1200,7 @@ class Path:
         ts = getattr(stat_info, attr)
         return datetime.fromtimestamp(ts)
 
+    @access_error_handler
     def _created_time_posix(self, *, follow_symlinks: bool = True) -> datetime:
         """Return the creation time of the file (POSIX implementation)."""
         try:
@@ -1131,6 +1212,7 @@ class Path:
 
         return datetime.fromtimestamp(ts)
 
+    @access_error_handler
     def created_time(self, *, follow_symlinks: bool = True) -> datetime:
         """Return the creation time of the file."""
 
