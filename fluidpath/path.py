@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime
 import fnmatch
-from functools import wraps
+from functools import total_ordering, wraps
 import os
 import os.path
 import pathlib
@@ -46,6 +46,7 @@ def access_error_handler(func: Callable[_S, _R]) -> Callable[_S, _R]:
     return wrapper
 
 
+@total_ordering
 class Path:
     def __init__(self, *segments: str | os.PathLike[str]) -> None:
         semantics = SemanticPathType.DIRECTORY
@@ -83,6 +84,15 @@ class Path:
 
         if isinstance(other, pathlib.Path):
             return self._path == other
+
+        return NotImplemented
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, type(self)):
+            return str(self) < str(other)
+
+        if isinstance(other, pathlib.Path):
+            return self._path < other
 
         return NotImplemented
 
@@ -292,6 +302,11 @@ class Path:
     def stem(self) -> str:
         """Return a string representing the path's last component, excluding the suffix."""
         return self._path.stem
+
+    @access_error_handler
+    def __abs__(self) -> Self:
+        """Return a new path with the path made absolute, without normalizing or resolving symlinks."""
+        return self.absolute()
 
     def absolute(self) -> Self:
         """Return a new path with the path made absolute, without normalizing or resolving symlinks."""
