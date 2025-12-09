@@ -8,6 +8,7 @@ import os.path
 import pathlib
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from typing import Any, BinaryIO, IO, Literal, overload, ParamSpec, TextIO, TypeVar
@@ -780,14 +781,17 @@ class Path:
             if ignore is None:
                 ignore = tuple()
 
-            shutil.copytree(
-                self,
-                to,
-                copy_function=copy_function,
-                symlinks=maintain_symlinks,
-                dirs_exist_ok=dirs_exist_ok,
-                ignore=shutil.ignore_patterns(*ignore),
-            )
+            try:
+                shutil.copytree(
+                    self,
+                    to,
+                    copy_function=copy_function,
+                    symlinks=maintain_symlinks,
+                    dirs_exist_ok=dirs_exist_ok,
+                    ignore=shutil.ignore_patterns(*ignore),
+                )
+            except shutil.Error as e:
+                raise OSError(f"Error while copying directory {self} -> {to}", *e.args)
         else:
             copy_function(self, to, follow_symlinks=follow_symlinks)
 
@@ -860,7 +864,12 @@ class Path:
             raise FileNotFoundError(f"Cannot move nonexistent path: {self}")
 
         copy_function = shutil.copy2 if metadata else shutil.copy
-        shutil.move(self, to, copy_function=copy_function)
+        try:
+            dest = pathlib.Path(shutil.move(self, to, copy_function=copy_function))
+        except shutil.Error:
+            raise OSError(f"Destination path {str(to).rstrip(os.path.sep)}/{self.name} already exists")
+
+        return type(self)._from_pathlib_path(dest, semantic_path_type=self._semantic_path_type)
 
     @access_error_handler
     def rename(self, to: str | os.PathLike[str], *, force: bool = True) -> Self:
@@ -1142,6 +1151,43 @@ class Path:
     def group_id(self, *, follow_symlinks: bool = True) -> int:
         """Return the group ID of the file owner."""
         return self.stat(follow_symlinks=follow_symlinks).st_gid
+
+    @access_error_handler
+    def mode(self, *, follow_symlinks: bool = True) -> int:
+        """Return the numeric octal mode (permissions) of the file.
+
+        >>> Path("/path/to/file/with/mode/0o755").mode()
+        493
+        >>> oct(Path("/path/to/file/with/mode/0o755").mode())
+        '0o755'
+
+        :param follow_symlinks:
+            If True and `self` is a symbolic link, return the permission mask for the target of the link;
+            if False, return the permission mask for the link itself.
+
+        :returns: The numeric (octal) mode (permissions) for the given file.
+
+        :raises FileNotFoundError: If this path does not exist
+        :raises OSError: If the path cannot be accessed for, e.g., permissions reasons.
+        """
+        mode = self.stat(follow_symlinks=follow_symlinks).st_mode
+        return stat.S_IMODE(mode)
+
+    @access_error_handler
+    def permission_string(self, *, follow_symlinks: bool = True) -> str:
+        """Return the symbolic permission string of the file (e.g., "-rwxr-xr-x").
+
+        >>> Path("/path/to/file/with/mode/0o755").permission_string()
+        '-rwxr-xr-x'
+
+        This string also includes the file type character prefix ("-" for files, "d" for directories).
+
+        :returns: The symbolic permission string for the given file.
+
+        :raises FileNotFoundError: If this path does not exist
+        :raises OSError: If the path cannot be accessed for, e.g., permissions reasons.
+        """
+        return oct(self.mode(follow_symlinks=follow_symlinks))
 
     @access_error_handler
     def inode(self, *, follow_symlinks: bool = True) -> int:
