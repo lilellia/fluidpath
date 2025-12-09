@@ -1,7 +1,10 @@
 def get_uid_of(user: int | str | None) -> int:
     """Return the user ID of the given user.
 
-    Raises KeyError if the user does not exist.
+    :param user: The uid or username of the user. If None, return -1.
+    :returns: The user ID of the given user.
+    :raises OSError: If `user` is a string and the string --> uid mapping is not available on this platform.
+    :raises KeyError: If `user` is a string and the username is not a valid user on this system.
     """
     if user is None:
         return -1
@@ -21,7 +24,10 @@ def get_uid_of(user: int | str | None) -> int:
 def get_gid_of(group: int | str | None) -> int:
     """Return the group ID of the given group.
 
-    Raises KeyError if the group does not exist.
+    :param group: The gid or name of the user. If None, return -1.
+    :returns: The group ID of the given group.
+    :raises OSError: If `group` is a string and the string --> gid mapping is not available on this platform.
+    :raises KeyError: If `group` is a string and the group name is not a valid group on this system.
     """
     if group is None:
         return -1

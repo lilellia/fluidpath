@@ -3,6 +3,7 @@ import stat
 
 
 class PathType(Enum):
+    """An enumeration of various physical path types."""
     REGULAR_FILE = auto()
     DIRECTORY = auto()
     SYMLINK = auto()
@@ -15,6 +16,11 @@ class PathType(Enum):
 
 
 def identify_st_mode(mode: int) -> PathType:
+    """Identify the path type from the given stat mode.
+    
+    :param mode: The mode of the path, as returned by :py:func:`os.stat`, via `os.stat(path).st_mode`.
+    :returns: The path type
+    """
     if stat.S_ISREG(mode):
         return PathType.REGULAR_FILE
 

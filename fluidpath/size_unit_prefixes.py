@@ -1,9 +1,11 @@
 from typing import Literal
 
+# type aliases for size prefixes
 DecimalSizePrefix = Literal["B", "K", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"]
 BinarySizePrefix = Literal["B", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi", "Ri", "Qi"]
 
-
+# dict of size conversions between the given units and bytes
+# "KB": 1000.0 means that 1 KB is 1000 bytes
 SIZE_PREFIX_CONVERSIONS = {
     "B": 1,
     "KB": 1e3,
