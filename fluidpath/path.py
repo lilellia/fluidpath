@@ -962,7 +962,7 @@ class Path:
 
     @access_error_handler
     def walk(
-        self, *, top_down: bool = True, on_error: Callable[[OSError], None] | None = None
+        self, *, top_down: bool = True, on_error: Callable[[OSError], None] | None = None, follow_symlinks: bool = False
     ) -> Iterator[tuple[Self, list[str], list[str]]]:
         """Generate the file n ames in a directory tree by walking the directory tree top-down.
 
@@ -976,7 +976,7 @@ class Path:
 
         If `top_down` is False, the triple for a directory is generated after the triples for all of its subdirectories.
         """
-        for root_name, dirnames, filenames in os.walk(str(self), top_down, on_error):
+        for root_name, dirnames, filenames in os.walk(str(self), top_down, on_error, followlinks=follow_symlinks):
             yield type(self)(root_name), dirnames, filenames
 
     @access_error_handler
@@ -1079,29 +1079,21 @@ class Path:
             yield path
 
     @access_error_handler
-    def touch(self, *, mode: int = 0o666, exist_ok: bool = False) -> None:
+    def touch(self, *, mode: int = 0o666, exist_ok: bool = True, strict: bool = True) -> None:
         """Create an empty file at this path.
 
-        If `mode` is given, it is combined with the process's umask value to determine file mode and access flags.
+        if strict and self._semantic_path_type == SemanticPathType.DIRECTORY:
+            raise IsADirectoryError(f"Cannot `touch` directory: {self}. Use `mkdir` instead.")
 
-        If the file exists, the function succeeds when `exist_ok` is true (and its modification time is updated);
-        otherwise, FileExistsError is raised.
-        """
         self._path.touch(mode=mode, exist_ok=exist_ok)
 
     @access_error_handler
-    def mkdir(self, *, mode: int = 0o777, parents: bool = False, exist_ok: bool = False) -> None:
+    def mkdir(self, *, mode: int = 0o777, parents: bool = False, exist_ok: bool = False, strict: bool = True) -> None:
         """Create a directory at this path.
 
-        If `mode` is given, it is combined with the process's umask value to determine file mode and access flags.
+        if strict and self._semantic_path_type == SemanticPathType.FILE:
+            raise NotADirectoryError(f"Cannot `mkdir` file: {self}. Use `touch` instead.")
 
-        If `parents` is True, any missing parent directories are created as needed, with the default permissions
-        (without taking `mode` into account, which mimics POSIX `mkdir -p`). If `parents` is False, any missing
-        directories cause FileNotFoundError to be raised.
-
-        If `exist_ok` is False, FileExistsError is not raised if the target directory already exists;
-        if `exist_ok` is True, the error is not raised unless the path itself exists and is not a directory.
-        """
         self._path.mkdir(mode=mode, parents=parents, exist_ok=exist_ok)
 
     @access_error_handler
